@@ -1,0 +1,25 @@
+{
+  "name": "stickman-generator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cross-env NODE_ENV=development node --watch server.js",
+    "build": "vite build",
+    "start": "node server.js",
+    "check": "node --check server.js && vite build"
+  },
+  "dependencies": {
+    "@remotion/media": "^4.0.332",
+    "@remotion/player": "^4.0.332",
+    "cross-env": "^10.0.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "openai": "^5.12.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "remotion": "^4.0.332",
+    "vite": "^7.0.6"
+  }
+}
