@@ -99,7 +99,7 @@ export const App = () => {
           <p className="eyebrow">AUDIO → STORYBOARD → VIDÉO</p>
           <h1>Transforme ta voix en<br /><span>dessins affreusement simples.</span></h1>
           <p className="intro">
-            Dépose un audio. L’application le découpe, dirige une série
+            Dépose un audio ou une vidéo. L’application en extrait la voix, la découpe, dirige une série
             d’illustrations cohérentes, puis assemble automatiquement la vidéo.
           </p>
         </section>
@@ -117,11 +117,11 @@ export const App = () => {
             }}
           >
             <span className="upload-icon">↑</span>
-            <strong>{file?.name || "Dépose ton fichier audio ici"}</strong>
-            <span>{file ? formatBytes(file.size) : "ou clique pour choisir un fichier · 25 Mo maximum"}</span>
+            <strong>{file?.name || "Dépose ton fichier audio ou vidéo ici"}</strong>
+            <span>{file ? formatBytes(file.size) : "ou clique pour choisir un fichier · vidéo de 250 Mo maximum"}</span>
             <input
               type="file"
-              accept="audio/*,.mp3,.wav,.m4a,.webm,.mp4"
+              accept="audio/*,video/*,.mp3,.wav,.m4a,.webm,.mp4,.mov,.mkv,.avi"
               disabled={busy}
               onChange={(event) => selectFiles(event.target.files)}
             />

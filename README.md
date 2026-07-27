@@ -1,13 +1,14 @@
 # Stickman Generator — MVP
 
-Application Node.js qui transforme un fichier audio en storyboard illustré :
+Application Node.js qui transforme un fichier audio ou vidéo en storyboard illustré :
 
-1. transcription et timestamps mot à mot avec `whisper-1` ;
-2. regroupement du texte en scènes cohérentes de 2 à 4 secondes avec `gpt-5.6-sol` ;
-3. direction artistique et rédaction de prompts cohérents avec `gpt-5.6-sol` ;
-4. génération parallèle de chaque illustration avec `gpt-image-2` ;
-5. affichage progressif des images dans le navigateur ;
-6. prévisualisation du montage audio/image synchronisé avec Remotion Player.
+1. extraction automatique de la piste MP3 pour les vidéos avec FFmpeg ;
+2. transcription et timestamps mot à mot avec `whisper-1` ;
+3. regroupement du texte en scènes cohérentes de 2 à 4 secondes avec `gpt-5.6-sol` ;
+4. direction artistique et rédaction de prompts cohérents avec `gpt-5.6-sol` ;
+5. génération parallèle de chaque illustration avec `gpt-image-2` ;
+6. affichage progressif des images dans le navigateur ;
+7. prévisualisation du montage audio/image synchronisé avec Remotion Player.
 
 ## Installation
 
@@ -43,4 +44,5 @@ Ouvre <http://localhost:3000>.
 - elles disparaissent lorsque le serveur redémarre ;
 - les fichiers audio temporaires sont supprimés après traitement ;
 - la vidéo est une prévisualisation interactive, aucun MP4 n’est encodé ;
-- la taille maximale d’un fichier est de 25 Mo.
+- la taille maximale d’une vidéo est de 250 Mo ;
+- après extraction, la piste audio envoyée à Whisper ne doit pas dépasser 25 Mo.

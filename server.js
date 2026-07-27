@@ -2,8 +2,10 @@ import "dotenv/config";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import ffmpegPath from "ffmpeg-static";
 import multer from "multer";
 import OpenAI, { toFile } from "openai";
 
@@ -16,17 +18,27 @@ const imageQuality = ["low", "medium", "high"].includes(
 )
   ? process.env.IMAGE_QUALITY.toLowerCase()
   : "medium";
+const CHARACTER_RULES = `
+Règles permanentes pour les personnages :
+- Le personnage principal récurrent est toujours le même stickman : tête ronde blanche sans remplissage, contour noir épais et irrégulier, exactement deux petits yeux noirs pleins en forme de points, petite bouche tracée avec une seule ligne, corps formé d'une seule ligne noire verticale, bras et jambes faits d'une seule ligne noire chacun.
+- Ne lui dessine jamais des yeux en cercles avec pupilles, des yeux réalistes, un torse carré, un corps rempli de couleur ou un t-shirt bleu générique.
+- Son anatomie graphique et son visage de base ne changent jamais d'une vidéo à l'autre. Son expression, sa pose, l'orientation de son corps et les objets qu'il tient peuvent changer selon la scène.
+- Ses vêtements, accessoires ou cheveux peuvent changer uniquement lorsque le récit, le métier, l'époque, le lieu ou l'identité représentée l'exigent. Ils doivent rester extrêmement simples et être ajoutés par-dessus sa structure de stickman sans transformer son corps en personnage réaliste.
+- Les autres personnes utilisent le même style de stickman très simple, mais doivent être différenciées avec un ou deux signes visuels utiles seulement : coiffure, chapeau, moustache, lunettes, couleur de vêtement, accessoire, taille ou silhouette.
+- Pour une personnalité ou un événement historique, autorise les vêtements, coiffures, couvre-chefs, expressions et poses nécessaires pour reconnaître la personne ou l'époque, tout en conservant le dessin enfantin MS Paint et les yeux en points noirs.
+- N'ajoute pas de différences décoratives aléatoires. Chaque variation doit aider à comprendre qui est qui ou ce qui se passe.
+`.trim();
 
 fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
 
 const upload = multer({
   dest: path.join(__dirname, "uploads"),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 250 * 1024 * 1024 },
 });
 
 app.post("/api/jobs", upload.single("audio"), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: "Ajoute un fichier audio." });
+    return res.status(400).json({ error: "Ajoute un fichier audio ou vidéo." });
   }
 
   if (!process.env.OPENAI_API_KEY) {
@@ -111,16 +123,32 @@ app.get("/api/health", (_req, res) => {
 
 async function runJob(job, file) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  let mediaFile = file;
 
   try {
-    job.audioBuffer = await fs.promises.readFile(file.path);
+    if (isVideoFile(file)) {
+      job.status = "working";
+      job.phase = "Extraction de l’audio de la vidéo…";
+      job.progress = 2;
+      mediaFile = await extractAudioAsMp3(file);
+    }
+
+    const audioStats = await fs.promises.stat(mediaFile.path);
+    if (audioStats.size > 25 * 1024 * 1024) {
+      throw new Error(
+        "L’audio extrait dépasse 25 Mo. Utilise une vidéo plus courte ou plus compressée.",
+      );
+    }
+
+    job.audioBuffer = await fs.promises.readFile(mediaFile.path);
+    job.audioMime = mediaFile.mimetype;
     job.status = "working";
     job.phase = "Transcription mot à mot…";
     job.progress = 5;
 
     const transcription = await openai.audio.transcriptions.create({
-      file: await toFile(fs.createReadStream(file.path), file.originalname, {
-        type: file.mimetype,
+      file: await toFile(fs.createReadStream(mediaFile.path), mediaFile.originalname, {
+        type: mediaFile.mimetype,
       }),
       model: "whisper-1",
       response_format: "verbose_json",
@@ -158,7 +186,64 @@ async function runJob(job, file) {
     job.progress = 100;
   } finally {
     fs.unlink(file.path, () => {});
+    if (mediaFile.path !== file.path) fs.unlink(mediaFile.path, () => {});
   }
+}
+
+function isVideoFile(file) {
+  const extension = path.extname(file.originalname).toLowerCase();
+  return file.mimetype.startsWith("video/") || [".mp4", ".mov", ".mkv", ".avi"].includes(extension);
+}
+
+async function extractAudioAsMp3(file) {
+  if (!ffmpegPath) {
+    throw new Error("FFmpeg n’est pas disponible sur cette plateforme.");
+  }
+
+  const outputPath = `${file.path}.mp3`;
+  await new Promise((resolve, reject) => {
+    const ffmpeg = spawn(
+      ffmpegPath,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        file.path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "44100",
+        "-b:a",
+        "96k",
+        outputPath,
+      ],
+      { windowsHide: true },
+    );
+    let errorOutput = "";
+
+    ffmpeg.stderr.on("data", (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    ffmpeg.on("error", reject);
+    ffmpeg.on("close", (code) => {
+      if (code === 0) return resolve();
+      reject(
+        new Error(
+          `Impossible d’extraire l’audio de cette vidéo.${errorOutput ? ` ${errorOutput.trim()}` : ""}`,
+        ),
+      );
+    });
+  });
+
+  return {
+    ...file,
+    path: outputPath,
+    originalname: `${path.parse(file.originalname).name}.mp3`,
+    mimetype: "audio/mpeg",
+  };
 }
 
 async function createVisualPrompts(openai, segments) {
@@ -172,8 +257,12 @@ Les images doivent raconter la progression du texte et rester cohérentes entre 
 Si un narrateur ou personnage revient, conserve exactement son apparence, ses couleurs et ses accessoires.
 Chaque prompt doit être autonome : répète les détails nécessaires à la cohérence, car les images seront générées dans des requêtes séparées.
 N'ajoute aucune idée qui contredit le texte.
+Évite généralement le texte dans les images. Cependant, si le passage contient une date, un nombre important, une durée ou un lieu géographique, tu peux demander à afficher exactement cet élément dans l'image lorsqu'il aide à comprendre ou à mémoriser l'information. Dans ce cas, conserve uniquement le texte essentiel, recopie-le fidèlement depuis le passage et précise dans le prompt qu'il doit être grand, correctement orthographié et facile à lire.
+La fiche du personnage principal est permanente entre toutes les vidéos, pas seulement entre les scènes de ce storyboard. Reprends ses caractéristiques exactement dans chaque prompt où il apparaît. Ne confonds pas le personnage principal avec une autre personne représentée.
 
-Style obligatoire pour toutes les scènes : dessin extrêmement simple et volontairement mauvais fait par un débutant dans MS Paint, fond blanc, contours noirs épais et tremblants, personnages bâtons, formes géométriques basiques, expressions simples, couleurs plates rares, beaucoup d'espace vide, aucune ombre, aucun dégradé, aucune 3D, aucun anime, aucun rendu professionnel, composition horizontale 16:9 claire et centrée. Évite le texte dans l'image.
+${CHARACTER_RULES}
+
+Style obligatoire pour toutes les scènes : dessin extrêmement simple et volontairement mauvais fait par un débutant dans MS Paint, fond blanc, contours noirs épais et tremblants, personnages bâtons, formes géométriques basiques, expressions simples, couleurs plates rares, beaucoup d'espace vide, aucune ombre, aucun dégradé, aucune 3D, aucun anime, aucun rendu professionnel, composition horizontale 16:9 claire et centrée.
 `.trim(),
     input: JSON.stringify(
       segments.map(({ start, end, text }, index) => ({ index, start, end, text })),
@@ -215,6 +304,7 @@ Style obligatoire pour toutes les scènes : dessin extrêmement simple et volont
   return segments.map((segment, index) => ({
     ...segment,
     visualPrompt: [
+      CHARACTER_RULES,
       direction.styleBible,
       promptByIndex.get(index) || buildImagePrompt(segment, index, segments),
       "Wide horizontal 16:9 YouTube frame. Keep every important element away from the edges.",
@@ -393,8 +483,11 @@ STYLE OBLIGATOIRE :
 - composition amusante, claire, centrée et immédiatement compréhensible
 - aucune ombre réaliste, aucun dégradé, aucune texture complexe
 - aucun rendu 3D, cinématographique, anime, Disney, vectoriel ou professionnel
-- pas de détails inutiles et pas de texte, sauf un mot très court indispensable
+- pas de détails inutiles ; évite généralement le texte
+- si le passage contient une date, un nombre important, une durée ou un lieu géographique utile à la compréhension, tu peux afficher exactement cet élément, en grand, correctement orthographié et facile à lire
 - cadre horizontal 16:9, ne rien couper sur les bords
+
+${CHARACTER_RULES}
 
 Montre une seule idée visuelle forte correspondant précisément au passage, avec au maximum trois personnages ou objets principaux.
 `.trim();
