@@ -13,11 +13,45 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const jobs = new Map();
+const projectsRoot = path.join(__dirname, "data", "projects");
+const FORMAT_PRESETS = {
+  horizontal: {
+    id: "horizontal",
+    label: "Horizontal 16:9",
+    imageSize: "1536x864",
+    width: 1536,
+    height: 864,
+    ratio: "16:9",
+    prompt:
+      "Cadre horizontal 16:9 de type vidéo YouTube. Composition large, claire et centrée.",
+  },
+  vertical: {
+    id: "vertical",
+    label: "Vertical 4:5",
+    imageSize: "1024x1280",
+    width: 1024,
+    height: 1280,
+    ratio: "4:5",
+    prompt:
+      "Cadre vertical 4:5. Composition organisée de haut en bas, claire et centrée, adaptée à un écran mobile. Ne crée pas une image horizontale et ne place rien d’important près des bords.",
+  },
+};
 const imageQuality = ["low", "medium", "high"].includes(
   process.env.IMAGE_QUALITY?.toLowerCase(),
 )
   ? process.env.IMAGE_QUALITY.toLowerCase()
   : "medium";
+const imageReloadQuality = ["low", "medium", "high"].includes(
+  process.env.IMAGE_QUALITY_RELOAD?.toLowerCase(),
+)
+  ? process.env.IMAGE_QUALITY_RELOAD.toLowerCase()
+  : "medium";
+const sceneMaxDuration = parseDecimalSetting(
+  process.env.MAX_SCENE_DURATION,
+  2.5,
+  0.5,
+  30,
+);
 const CHARACTER_RULES = `
 Règles permanentes pour les personnages :
 - Le personnage principal récurrent est toujours le même stickman : tête ronde blanche sans remplissage, contour noir épais et irrégulier, exactement deux petits yeux noirs pleins en forme de points, petite bouche tracée avec une seule ligne, corps formé d'une seule ligne noire verticale, bras et jambes faits d'une seule ligne noire chacun.
@@ -30,11 +64,14 @@ Règles permanentes pour les personnages :
 `.trim();
 
 fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
+fs.mkdirSync(projectsRoot, { recursive: true });
 
 const upload = multer({
   dest: path.join(__dirname, "uploads"),
   limits: { fileSize: 250 * 1024 * 1024 },
 });
+
+app.use(express.json({ limit: "32kb" }));
 
 app.post("/api/jobs", upload.single("audio"), async (req, res) => {
   if (!req.file) {
@@ -49,21 +86,38 @@ app.post("/api/jobs", upload.single("audio"), async (req, res) => {
   }
 
   const id = crypto.randomUUID();
+  const visualFormat = getVisualFormat(req.body?.format);
+  const projectDir = path.join(projectsRoot, id);
+  await fs.promises.mkdir(path.join(projectDir, "images"), { recursive: true });
   const job = {
     id,
+    title: path.parse(req.file.originalname).name,
     status: "queued",
     phase: "Préparation de l’audio…",
     progress: 0,
     transcript: "",
+    words: [],
     segments: [],
     images: [],
-    audioBuffer: null,
     audioMime: req.file.mimetype,
+    audioFilename: null,
+    source: {
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      kind: isVideoFile(req.file) ? "video" : "audio",
+    },
+    pipeline: {},
+    visualFormat,
     error: null,
-    createdAt: Date.now(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    projectDir,
+    saveChain: Promise.resolve(),
   };
 
   jobs.set(id, job);
+  await queueSave(job);
   res.status(202).json({ id });
 
   runJob(job, req.file).catch((error) => {
@@ -71,6 +125,7 @@ app.post("/api/jobs", upload.single("audio"), async (req, res) => {
     job.status = "failed";
     job.phase = "Échec";
     job.error = formatError(error);
+    queueSave(job);
   });
 });
 
@@ -78,18 +133,44 @@ app.get("/api/jobs/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Tâche introuvable." });
   const since = Math.max(0, Number.parseInt(req.query.since || "0", 10) || 0);
-  const { audioBuffer, ...publicJob } = job;
   res.json({
-    ...publicJob,
-    audioUrl: audioBuffer ? `/api/jobs/${job.id}/audio` : null,
+    ...toPublicProject(job),
     images: job.images.slice(since),
   });
 });
 
-app.get("/api/jobs/:id/audio", (req, res) => {
+app.get("/api/projects", (_req, res) => {
+  const projects = [...jobs.values()]
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((job) => ({
+      id: job.id,
+      title: job.title,
+      status: job.status,
+      phase: job.phase,
+      progress: job.progress,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+      imageCount: job.images.filter((image) => !image.error).length,
+      duration: job.segments.at(-1)?.end || 0,
+      thumbnail: job.images.find((image) => image.src)?.src || null,
+      source: job.source,
+      visualFormat: job.visualFormat,
+    }));
+  res.json(projects);
+});
+
+app.get("/api/projects/:id", (req, res) => {
   const job = jobs.get(req.params.id);
-  if (!job?.audioBuffer) return res.status(404).send("Audio introuvable.");
-  const total = job.audioBuffer.length;
+  if (!job) return res.status(404).json({ error: "Projet introuvable." });
+  res.json(toPublicProject(job));
+});
+
+app.get(["/api/jobs/:id/audio", "/api/projects/:id/audio"], (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job?.audioFilename) return res.status(404).send("Audio introuvable.");
+  const audioPath = path.join(job.projectDir, job.audioFilename);
+  if (!fs.existsSync(audioPath)) return res.status(404).send("Audio introuvable.");
+  const total = fs.statSync(audioPath).size;
   const range = req.headers.range;
 
   res.type(job.audioMime || "audio/mpeg");
@@ -100,7 +181,7 @@ app.get("/api/jobs/:id/audio", (req, res) => {
 
   if (!range) {
     res.set("Content-Length", String(total));
-    return res.send(job.audioBuffer);
+    return fs.createReadStream(audioPath).pipe(res);
   }
 
   const match = /bytes=(\d+)-(\d*)/.exec(range);
@@ -114,7 +195,127 @@ app.get("/api/jobs/:id/audio", (req, res) => {
     "Content-Range": `bytes ${start}-${end}/${total}`,
     "Content-Length": String(end - start + 1),
   });
-  res.send(job.audioBuffer.subarray(start, end + 1));
+  fs.createReadStream(audioPath, { start, end }).pipe(res);
+});
+
+app.get("/api/projects/:id/images/:filename", (req, res) => {
+  if (!/^[a-zA-Z0-9_-]+\.png$/.test(req.params.filename)) {
+    return res.status(400).send("Nom d’image invalide.");
+  }
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).send("Projet introuvable.");
+  res.sendFile(path.join(job.projectDir, "images", req.params.filename));
+});
+
+app.post("/api/projects/:id/scenes/:index/regenerate", async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Projet introuvable." });
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "OPENAI_API_KEY est absente." });
+  }
+
+  const index = Number.parseInt(req.params.index, 10);
+  const image = job.images.find((candidate) => candidate.index === index);
+  const segment = job.segments[index];
+  if (!image || !segment) {
+    return res.status(404).json({ error: "Scène introuvable." });
+  }
+
+  normalizeImageVersions(job, image);
+  const currentVersion =
+    image.versions.find((version) => version.id === image.selectedVersionId) ||
+    image.versions.at(-1);
+  if (!currentVersion?.filename) {
+    return res.status(409).json({ error: "Aucune image de référence disponible." });
+  }
+
+  const extraInstructions = String(req.body?.instructions || "").trim().slice(0, 1500);
+  const referencePath = path.join(job.projectDir, "images", currentVersion.filename);
+  if (!fs.existsSync(referencePath)) {
+    return res.status(404).json({ error: "Le fichier de référence est introuvable." });
+  }
+
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const formatInstruction = job.visualFormat.prompt;
+    const regenerationPrompt = `
+Reproduis l'image de référence en créant une nouvelle version de la même scène.
+Conserve strictement le style MS Paint amateur, la composition générale, l'identité des personnages, leurs proportions et tous les éléments qui ne sont pas explicitement modifiés.
+
+Prompt visuel original de la scène :
+${segment.visualPrompt}
+
+Instructions supplémentaires de l'utilisateur :
+${extraInstructions || "Créer une variante très fidèle, avec seulement de petites différences naturelles de dessin."}
+
+Format obligatoire : ${formatInstruction}
+Conserve exactement le ratio ${job.visualFormat.ratio} du projet. N'ajoute aucun détail non demandé.
+`.trim();
+
+    const result = await openai.images.edit({
+      model: "gpt-image-2",
+      image: await toFile(
+        fs.createReadStream(referencePath),
+        currentVersion.filename,
+        { type: "image/png" },
+      ),
+      prompt: regenerationPrompt,
+      size: job.visualFormat.imageSize,
+      quality: imageReloadQuality,
+      output_format: "png",
+    });
+
+    const versionId = `v-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+    const filename = `${String(index).padStart(4, "0")}-${versionId}.png`;
+    await fs.promises.writeFile(
+      path.join(job.projectDir, "images", filename),
+      Buffer.from(result.data[0].b64_json, "base64"),
+    );
+
+    const version = {
+      id: versionId,
+      filename,
+      src: `/api/projects/${job.id}/images/${filename}`,
+      createdAt: new Date().toISOString(),
+      basedOnVersionId: currentVersion.id,
+      instructions: extraInstructions,
+      prompt: regenerationPrompt,
+      quality: imageReloadQuality,
+    };
+    image.versions.push(version);
+    image.selectedVersionId = versionId;
+    image.filename = filename;
+    image.src = version.src;
+    image.error = null;
+    await queueSave(job);
+
+    res.json(toPublicProject(job));
+  } catch (error) {
+    console.error(error);
+    res.status(error?.status || 500).json({ error: formatError(error) });
+  }
+});
+
+app.post("/api/projects/:id/scenes/:index/select-version", async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Projet introuvable." });
+
+  const index = Number.parseInt(req.params.index, 10);
+  const image = job.images.find((candidate) => candidate.index === index);
+  if (!image) return res.status(404).json({ error: "Scène introuvable." });
+
+  normalizeImageVersions(job, image);
+  const version = image.versions.find(
+    (candidate) => candidate.id === req.body?.versionId,
+  );
+  if (!version) return res.status(404).json({ error: "Version introuvable." });
+
+  image.selectedVersionId = version.id;
+  image.filename = version.filename;
+  image.src = version.src;
+  image.error = null;
+  await queueSave(job);
+  res.json(toPublicProject(job));
 });
 
 app.get("/api/health", (_req, res) => {
@@ -140,11 +341,22 @@ async function runJob(job, file) {
       );
     }
 
-    job.audioBuffer = await fs.promises.readFile(mediaFile.path);
     job.audioMime = mediaFile.mimetype;
+    const sourceExtension = path.extname(mediaFile.originalname).toLowerCase();
+    const safeExtension = [".mp3", ".wav", ".m4a", ".webm", ".mp4", ".mpeg", ".mpga"].includes(
+      sourceExtension,
+    )
+      ? sourceExtension
+      : ".mp3";
+    job.audioFilename = `audio${safeExtension}`;
+    await fs.promises.copyFile(
+      mediaFile.path,
+      path.join(job.projectDir, job.audioFilename),
+    );
     job.status = "working";
     job.phase = "Transcription mot à mot…";
     job.progress = 5;
+    await queueSave(job);
 
     const transcription = await openai.audio.transcriptions.create({
       file: await toFile(fs.createReadStream(mediaFile.path), mediaFile.originalname, {
@@ -167,23 +379,62 @@ async function runJob(job, file) {
     }
 
     job.transcript = transcription.text;
+    job.words = words;
+    job.pipeline.transcription = {
+      model: "whisper-1",
+      responseFormat: "verbose_json",
+      timestampGranularities: ["word"],
+      text: transcription.text,
+      words,
+    };
     job.phase = "Découpage du script en plans…";
     job.progress = 15;
+    await queueSave(job);
 
-    const segments = await createSegments(openai, words);
+    const segmentation = await createSegments(openai, words);
+    const segments = segmentation.segments;
+    job.pipeline.segmentation = {
+      model: process.env.SEGMENTATION_MODEL || "gpt-5.6-sol",
+      reasoningEffort: "none",
+      maxSceneDuration: sceneMaxDuration,
+      instructions: segmentation.instructions,
+      response: segmentation.response,
+    };
     job.segments = segments;
     job.phase = "Création d’une direction visuelle cohérente…";
     job.progress = 22;
+    await queueSave(job);
 
-    const directedSegments = await createVisualPrompts(openai, segments);
+    const visualDirection = await createVisualPrompts(
+      openai,
+      segments,
+      job.visualFormat,
+    );
+    const directedSegments = visualDirection.segments;
+    job.pipeline.visualDirection = {
+      model: process.env.PROMPT_MODEL || "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      instructions: visualDirection.instructions,
+      response: visualDirection.response,
+    };
+    job.pipeline.imageGeneration = {
+      model: "gpt-image-2",
+      quality: imageQuality,
+      reloadQuality: imageReloadQuality,
+      size: job.visualFormat.imageSize,
+      format: job.visualFormat,
+      concurrency: getImageConcurrency(),
+    };
     job.segments = directedSegments;
     job.progress = 30;
+    await queueSave(job);
 
     await generateImagesInParallel(openai, job, directedSegments);
 
     job.status = "completed";
     job.phase = "Terminé";
     job.progress = 100;
+    await queueSave(job);
   } finally {
     fs.unlink(file.path, () => {});
     if (mediaFile.path !== file.path) fs.unlink(mediaFile.path, () => {});
@@ -246,11 +497,8 @@ async function extractAudioAsMp3(file) {
   };
 }
 
-async function createVisualPrompts(openai, segments) {
-  const response = await openai.responses.create({
-    model: process.env.PROMPT_MODEL || "gpt-5.6-sol",
-    reasoning: { effort: "medium" },
-    instructions: `
+async function createVisualPrompts(openai, segments, visualFormat) {
+  const instructions = `
 Tu es directeur artistique d'une vidéo pédagogique illustrée.
 À partir de toutes les scènes horodatées, conçois une direction visuelle globale puis un prompt d'image précis pour chaque scène.
 Les images doivent raconter la progression du texte et rester cohérentes entre elles.
@@ -262,8 +510,15 @@ La fiche du personnage principal est permanente entre toutes les vidéos, pas se
 
 ${CHARACTER_RULES}
 
-Style obligatoire pour toutes les scènes : dessin extrêmement simple et volontairement mauvais fait par un débutant dans MS Paint, fond blanc, contours noirs épais et tremblants, personnages bâtons, formes géométriques basiques, expressions simples, couleurs plates rares, beaucoup d'espace vide, aucune ombre, aucun dégradé, aucune 3D, aucun anime, aucun rendu professionnel, composition horizontale 16:9 claire et centrée.
-`.trim(),
+Style obligatoire pour toutes les scènes : dessin extrêmement simple et volontairement mauvais fait par un débutant dans MS Paint, fond blanc, contours noirs épais et tremblants, personnages bâtons, formes géométriques basiques, expressions simples, couleurs plates rares, beaucoup d'espace vide, aucune ombre, aucun dégradé, aucune 3D, aucun anime, aucun rendu professionnel.
+
+Format obligatoire pour l'ensemble du projet : ${visualFormat.prompt}
+Tous les prompts de scène doivent rappeler explicitement le ratio ${visualFormat.ratio}. Organise la composition pour ce format précis.
+`.trim();
+  const response = await openai.responses.create({
+    model: process.env.PROMPT_MODEL || "gpt-5.6-sol",
+    reasoning: { effort: "medium" },
+    instructions,
     input: JSON.stringify(
       segments.map(({ start, end, text }, index) => ({ index, start, end, text })),
     ),
@@ -301,22 +556,24 @@ Style obligatoire pour toutes les scènes : dessin extrêmement simple et volont
     direction.scenes.map((scene) => [scene.index, scene.visualPrompt]),
   );
 
-  return segments.map((segment, index) => ({
-    ...segment,
-    visualPrompt: [
-      CHARACTER_RULES,
-      direction.styleBible,
-      promptByIndex.get(index) || buildImagePrompt(segment, index, segments),
-      "Wide horizontal 16:9 YouTube frame. Keep every important element away from the edges.",
-    ].join("\n\n"),
-  }));
+  return {
+    instructions,
+    response: direction,
+    segments: segments.map((segment, index) => ({
+      ...segment,
+      visualPrompt: [
+        CHARACTER_RULES,
+        direction.styleBible,
+        promptByIndex.get(index) ||
+          buildImagePrompt(segment, index, segments, visualFormat),
+        visualFormat.prompt,
+      ].join("\n\n"),
+    })),
+  };
 }
 
 async function generateImagesInParallel(openai, job, segments) {
-  const concurrency = Math.max(
-    1,
-    Math.min(6, Number.parseInt(process.env.IMAGE_CONCURRENCY || "3", 10) || 3),
-  );
+  const concurrency = getImageConcurrency();
   let cursor = 0;
   let completed = 0;
 
@@ -330,11 +587,25 @@ async function generateImagesInParallel(openai, job, segments) {
       try {
         const result = await openai.images.generate({
           model: "gpt-image-2",
-          size: "1536x864",
+          size: job.visualFormat.imageSize,
           quality: imageQuality,
           output_format: "png",
           prompt: segment.visualPrompt,
         });
+        const filename = `${String(index).padStart(4, "0")}.png`;
+        await fs.promises.writeFile(
+          path.join(job.projectDir, "images", filename),
+          Buffer.from(result.data[0].b64_json, "base64"),
+        );
+        const initialVersion = {
+          id: "original",
+          filename,
+          src: `/api/projects/${job.id}/images/${filename}`,
+          createdAt: new Date().toISOString(),
+          basedOnVersionId: null,
+          instructions: "",
+          prompt: segment.visualPrompt,
+        };
 
         job.images.push({
           index,
@@ -342,7 +613,10 @@ async function generateImagesInParallel(openai, job, segments) {
           end: segment.end,
           timestamp: formatTimestamp(segment.start),
           text: segment.text,
-          src: `data:image/png;base64,${result.data[0].b64_json}`,
+          filename,
+          src: initialVersion.src,
+          versions: [initialVersion],
+          selectedVersionId: initialVersion.id,
         });
       } catch (error) {
         job.images.push({
@@ -357,6 +631,7 @@ async function generateImagesInParallel(openai, job, segments) {
 
       completed += 1;
       job.progress = Math.round(30 + (completed / segments.length) * 70);
+      await queueSave(job);
     }
   };
 
@@ -365,18 +640,28 @@ async function generateImagesInParallel(openai, job, segments) {
   );
 }
 
+function getImageConcurrency() {
+  return Math.max(
+    1,
+    Math.min(6, Number.parseInt(process.env.IMAGE_CONCURRENCY || "3", 10) || 3),
+  );
+}
+
 async function createSegments(openai, words) {
+  const idealMinimum = Math.max(0.5, Math.round(sceneMaxDuration * 0.6 * 10) / 10);
+  const instructions = [
+    "Tu es monteur vidéo.",
+    "Regroupe une transcription horodatée en plans visuels cohérents.",
+    `Chaque plan doit durer idéalement entre ${idealMinimum} et ${sceneMaxDuration} secondes.`,
+    `La durée de ${sceneMaxDuration} secondes est un maximum strict à ne jamais dépasser.`,
+    "Privilégie une coupure sémantique naturelle à l'intérieur de cette limite.",
+    "Couvre tous les mots, dans l’ordre, sans chevauchement ni omission.",
+    "Retourne uniquement les index inclusifs du premier et du dernier mot de chaque plan.",
+  ].join(" ");
   const response = await openai.responses.create({
     model: process.env.SEGMENTATION_MODEL || "gpt-5.6-sol",
     reasoning: { effort: "none" },
-    instructions: [
-      "Tu es monteur vidéo.",
-      "Regroupe une transcription horodatée en plans visuels cohérents.",
-      "Chaque plan doit durer idéalement 2 à 4 secondes.",
-      "Ne coupe pas une expression au milieu si quelques dixièmes de seconde supplémentaires améliorent nettement le sens.",
-      "Couvre tous les mots, dans l’ordre, sans chevauchement ni omission.",
-      "Retourne uniquement les index inclusifs du premier et du dernier mot de chaque plan.",
-    ].join(" "),
+    instructions,
     input: JSON.stringify(words),
     text: {
       format: {
@@ -407,29 +692,41 @@ async function createSegments(openai, words) {
   });
 
   const proposed = JSON.parse(response.output_text).segments;
-  return normalizeSegments(words, proposed);
+  return {
+    instructions,
+    response: { segments: proposed },
+    segments: normalizeSegments(words, proposed, sceneMaxDuration),
+  };
 }
 
-function normalizeSegments(words, proposed) {
+function normalizeSegments(words, proposed, maxDuration) {
   const result = [];
   let cursor = 0;
 
   for (const candidate of proposed) {
     if (cursor >= words.length) break;
     const proposedEnd = Math.max(cursor, Math.min(words.length - 1, candidate.lastWord));
-    const hardLimit = findLastWordBefore(words, cursor, words[cursor].start + 4.5);
+    const hardLimit = findLastWordBefore(
+      words,
+      cursor,
+      words[cursor].start + maxDuration,
+    );
     const end = Math.min(proposedEnd, Math.max(cursor, hardLimit));
     result.push(toSegment(words, cursor, end));
     cursor = end + 1;
   }
 
   while (cursor < words.length) {
-    const end = findLastWordBefore(words, cursor, words[cursor].start + 4);
+    const end = findLastWordBefore(
+      words,
+      cursor,
+      words[cursor].start + maxDuration,
+    );
     result.push(toSegment(words, cursor, Math.max(cursor, end)));
     cursor = Math.max(cursor, end) + 1;
   }
 
-  return mergeTinyTail(result);
+  return mergeTinyTail(result, maxDuration);
 }
 
 function findLastWordBefore(words, startIndex, limit) {
@@ -449,11 +746,16 @@ function toSegment(words, firstWord, lastWord) {
   };
 }
 
-function mergeTinyTail(segments) {
+function mergeTinyTail(segments, maxDuration) {
   if (segments.length < 2) return segments;
   const tail = segments.at(-1);
   const previous = segments.at(-2);
-  if (tail.end - tail.start >= 1.2 || tail.end - previous.start > 4.8) return segments;
+  if (
+    tail.end - tail.start >= Math.min(1.2, maxDuration / 2) ||
+    tail.end - previous.start > maxDuration
+  ) {
+    return segments;
+  }
 
   previous.lastWord = tail.lastWord;
   previous.end = tail.end;
@@ -462,7 +764,7 @@ function mergeTinyTail(segments) {
   return segments;
 }
 
-function buildImagePrompt(segment, index, segments) {
+function buildImagePrompt(segment, index, segments, visualFormat) {
   const previous = segments[index - 1]?.text || "aucun";
   const next = segments[index + 1]?.text || "aucun";
 
@@ -485,7 +787,8 @@ STYLE OBLIGATOIRE :
 - aucun rendu 3D, cinématographique, anime, Disney, vectoriel ou professionnel
 - pas de détails inutiles ; évite généralement le texte
 - si le passage contient une date, un nombre important, une durée ou un lieu géographique utile à la compréhension, tu peux afficher exactement cet élément, en grand, correctement orthographié et facile à lire
-- cadre horizontal 16:9, ne rien couper sur les bords
+- format obligatoire : ${visualFormat.prompt}
+- respecter exactement le ratio ${visualFormat.ratio}, ne rien couper sur les bords
 
 ${CHARACTER_RULES}
 
@@ -503,14 +806,145 @@ function formatError(error) {
   return error?.error?.message || error?.message || "Une erreur inconnue est survenue.";
 }
 
-setInterval(() => {
-  const cutoff = Date.now() - 6 * 60 * 60 * 1000;
-  for (const [id, job] of jobs) {
-    if (job.createdAt < cutoff) jobs.delete(id);
+function parseDecimalSetting(value, fallback, minimum, maximum) {
+  const parsed = Number(String(value ?? "").trim().replace(",", "."));
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    return fallback;
   }
-}, 60 * 60 * 1000).unref();
+  return parsed;
+}
+
+function getVisualFormat(format) {
+  const preset =
+    format === "vertical" ? FORMAT_PRESETS.vertical : FORMAT_PRESETS.horizontal;
+  return { ...preset };
+}
+
+function projectSnapshot(job) {
+  return {
+    version: 1,
+    id: job.id,
+    title: job.title,
+    status: job.status,
+    phase: job.phase,
+    progress: job.progress,
+    transcript: job.transcript,
+    words: job.words,
+    segments: job.segments,
+    images: [...job.images].sort((a, b) => a.index - b.index),
+    audioMime: job.audioMime,
+    audioFilename: job.audioFilename,
+    source: job.source,
+    pipeline: job.pipeline,
+    visualFormat: job.visualFormat,
+    error: job.error,
+    createdAt: job.createdAt,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeImageVersions(job, image) {
+  if (!Array.isArray(image.versions)) {
+    image.versions = image.filename
+      ? [
+          {
+            id: "original",
+            filename: image.filename,
+            src: `/api/projects/${job.id}/images/${image.filename}`,
+            createdAt: job.createdAt,
+            basedOnVersionId: null,
+            instructions: "",
+            prompt: job.segments[image.index]?.visualPrompt || "",
+          },
+        ]
+      : [];
+  }
+
+  image.versions = image.versions.map((version) => ({
+    ...version,
+    src: version.filename
+      ? `/api/projects/${job.id}/images/${version.filename}`
+      : version.src,
+  }));
+
+  if (!image.selectedVersionId && image.versions.length) {
+    image.selectedVersionId = image.versions.at(-1).id;
+  }
+  const selected =
+    image.versions.find((version) => version.id === image.selectedVersionId) ||
+    image.versions.at(-1);
+  if (selected) {
+    image.filename = selected.filename;
+    image.src = selected.src;
+  }
+  return image;
+}
+
+function toPublicProject(job) {
+  const snapshot = projectSnapshot(job);
+  return {
+    ...snapshot,
+    audioUrl: snapshot.audioFilename
+      ? `/api/projects/${job.id}/audio`
+      : null,
+  };
+}
+
+function queueSave(job) {
+  job.updatedAt = new Date().toISOString();
+  job.saveChain = (job.saveChain || Promise.resolve())
+    .catch(() => {})
+    .then(async () => {
+      const snapshot = projectSnapshot(job);
+      const manifestPath = path.join(job.projectDir, "project.json");
+      const temporaryPath = path.join(job.projectDir, "project.json.tmp");
+      await fs.promises.writeFile(
+        temporaryPath,
+        JSON.stringify(snapshot, null, 2),
+        "utf8",
+      );
+      await fs.promises.rename(temporaryPath, manifestPath);
+    });
+  return job.saveChain;
+}
+
+async function loadProjects() {
+  const entries = await fs.promises.readdir(projectsRoot, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectDir = path.join(projectsRoot, entry.name);
+    const manifestPath = path.join(projectDir, "project.json");
+
+    try {
+      const saved = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+      const job = {
+        ...saved,
+        visualFormat: saved.visualFormat || getVisualFormat("horizontal"),
+        projectDir,
+        saveChain: Promise.resolve(),
+        images: saved.images || [],
+      };
+      job.images = job.images.map((image) => normalizeImageVersions(job, image));
+
+      if (["queued", "working"].includes(job.status)) {
+        job.status = "failed";
+        job.phase = "Traitement interrompu";
+        job.error =
+          "Le serveur a redémarré avant la fin de la génération. Les données déjà produites sont conservées.";
+        await queueSave(job);
+      }
+
+      jobs.set(job.id, job);
+    } catch (error) {
+      console.error(`Projet illisible ignoré : ${entry.name}`, error);
+    }
+  }
+}
 
 async function startServer() {
+  await loadProjects();
+
   if (process.env.NODE_ENV === "development") {
     const { createServer } = await import("vite");
     const vite = await createServer({
@@ -520,6 +954,10 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, "dist")));
+    app.use((req, res, next) => {
+      if (req.method !== "GET" || !req.accepts("html")) return next();
+      res.sendFile(path.join(__dirname, "dist", "index.html"));
+    });
   }
 
   app.listen(port, () => {
