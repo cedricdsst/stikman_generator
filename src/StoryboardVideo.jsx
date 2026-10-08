@@ -27,7 +27,11 @@ const Scene = ({ scene }) => {
           padding: 100,
         }}
       >
-        Image indisponible
+        <div style={{ display: "flex", flexDirection: "column", gap: 28, border: "5px dashed #aaa", padding: 50, maxWidth: "100%" }}>
+          <strong>Scène {scene.index + 1}</strong>
+          <span style={{ fontSize: 32 }}>{scene.description || scene.text}</span>
+          <small style={{ fontSize: 24 }}>{scene.error ? "Image à régénérer" : "Image en cours de préparation"}</small>
+        </div>
       </AbsoluteFill>
     );
   }
@@ -50,20 +54,24 @@ const Scene = ({ scene }) => {
   );
 };
 
-export const StoryboardVideo = ({ audioUrl, scenes }) => {
+export const StoryboardVideo = ({ audioUrl, scenes, audioDuration }) => {
   const { fps } = useVideoConfig();
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#fff" }}>
       {audioUrl ? <Audio src={audioUrl} /> : null}
       {scenes.map((scene, index) => {
-        const nextStart = scenes[index + 1]?.start;
-        const from = Math.max(0, Math.round(scene.start * fps));
+        const sceneStart = scene.timelineStart ?? scene.start;
+        const nextScene = scenes[index + 1];
+        const nextStart = nextScene
+          ? (nextScene.timelineStart ?? nextScene.start)
+          : audioDuration;
+        const from = Math.max(0, Math.round(sceneStart * fps));
         const until = Math.round((nextStart ?? scene.end) * fps);
 
         return (
           <Sequence
-            key={`${scene.index}-${scene.start}`}
+            key={`${scene.index}-${sceneStart}`}
             from={from}
             durationInFrames={Math.max(1, until - from)}
             premountFor={fps}
