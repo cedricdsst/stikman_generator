@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { readJson, trackWrite } from "./project-sync.js";
 
 export const SeriesCreator = ({ onCreated, onCancel, disabled = false }) => {
@@ -7,6 +7,20 @@ export const SeriesCreator = ({ onCreated, onCancel, disabled = false }) => {
   const [preview, setPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+  const dragDepth = useRef(0);
+  const locked = disabled || busy;
+  const selectImage = (file) => {
+    if (!file || locked) return;
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setError("Choisis une image PNG, JPEG ou WebP."); return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      setError("L’image ne doit pas dépasser 20 Mo."); return;
+    }
+    setError(""); setImage(file);
+  };
   useEffect(() => {
     if (!image) { setPreview(""); return; }
     const url = URL.createObjectURL(image); setPreview(url);
@@ -26,9 +40,28 @@ export const SeriesCreator = ({ onCreated, onCancel, disabled = false }) => {
   };
   return <div className="series-creator">
     <label>Nom de la série<input value={name} maxLength={100} disabled={disabled || busy} onChange={(event) => setName(event.target.value)} placeholder="Ex. : Les organisations criminelles" /></label>
-    <label>Image d’introduction obligatoire<input type="file" accept="image/png,image/jpeg,image/webp" disabled={disabled || busy} onChange={(event) => setImage(event.target.files?.[0] || null)} /></label>
+    <div className="series-image-field">
+      <span className="series-image-heading">Image d’introduction <small>Obligatoire</small></span>
+      <label className={`series-image-drop ${dragging ? "dragging" : ""} ${locked ? "disabled" : ""}`}
+        role="button" tabIndex={locked ? -1 : 0} aria-disabled={locked}
+        aria-label={image ? "Changer l’image d’introduction" : "Ajouter une image d’introduction"}
+        onKeyDown={(event) => {
+          if (!locked && ["Enter", " "].includes(event.key)) { event.preventDefault(); inputRef.current?.click(); }
+        }}
+        onDragEnter={(event) => { event.preventDefault(); if (!locked) { dragDepth.current += 1; setDragging(true); } }}
+        onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = locked ? "none" : "copy"; }}
+        onDragLeave={(event) => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
+        onDrop={(event) => { event.preventDefault(); event.stopPropagation(); dragDepth.current = 0; setDragging(false); selectImage(event.dataTransfer.files?.[0]); }}>
+        {preview ? <img className="series-image-preview" src={preview} alt="Image de la série" draggable="false" /> : null}
+        <span className="series-image-plus" aria-hidden="true">+</span>
+        <strong>{dragging ? "Dépose ton image ici" : image ? "Changer l’image" : "Ajouter l’image d’introduction"}</strong>
+        <span className="series-image-drop-help">Clique pour choisir un fichier ou glisse-dépose ton image ici</span>
+        {image ? <span className="series-image-filename">{image.name}</span> : null}
+        <input ref={inputRef} hidden tabIndex={-1} type="file" accept="image/png,image/jpeg,image/webp" disabled={locked}
+          onChange={(event) => { selectImage(event.target.files?.[0]); event.target.value = ""; }} />
+      </label>
+    </div>
     <p className="editor-hint">PNG, JPEG ou WebP · 20 Mo maximum. Une image 9:16 remplit le cadre vertical.</p>
-    {preview ? <img className="series-image-preview" src={preview} alt="Image de la série" /> : null}
     {error ? <p role="alert" className="scene-action-error">{error}</p> : null}
     <div className="series-actions">
       <button type="button" disabled={disabled || busy || !name.trim() || !image} onClick={create}>{busy ? "Création…" : "Créer ce dossier"}</button>

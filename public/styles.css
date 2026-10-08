@@ -14,7 +14,17 @@
 .field-label, .series-creator label { display: grid; gap: 8px; font-size: 14px; font-weight: 700; }
 .field-label select, .field-label textarea, .series-creator input { border: 2px solid var(--ink); background: white; font: inherit; padding: 10px; width: 100%; min-width: 0; }
 .series-creator { display: grid; gap: 15px; padding: 18px; margin-top: 12px; border: 2px dashed var(--ink); }
-.series-image-preview { max-height: 260px; max-width: 100%; object-fit: contain; justify-self: start; }
+.series-image-field { display: grid; gap: 10px; }
+.series-image-heading { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 700; }
+.series-image-heading small { font-size: 11px; font-weight: 400; color: var(--muted); }
+.series-creator .series-image-drop { display: flex; position: relative; min-height: 190px; padding: 24px 16px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border: 3px dashed #aaa; background: #fcfcfc; cursor: pointer; text-align: center; transition: background 150ms, border-color 150ms; }
+.series-creator .series-image-drop:hover, .series-creator .series-image-drop.dragging { border-color: var(--blue); background: #eef4ff; }
+.series-image-drop:focus-visible { outline: 3px solid var(--blue); outline-offset: 4px; }
+.series-creator .series-image-drop.disabled { cursor: default; opacity: 0.6; background: #eee; border-color: #aaa; }
+.series-image-plus { display: grid; place-items: center; width: 48px; height: 48px; border: var(--border); background: var(--blue); color: white; font-size: 32px; font-weight: 400; line-height: 1; box-shadow: 3px 3px 0 var(--ink); }
+.series-image-drop-help { color: var(--muted); font-size: 13px; font-weight: 400; line-height: 1.5; }
+.series-image-filename { max-width: 100%; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.series-image-preview { max-height: 180px; max-width: 100%; object-fit: contain; }
 .series-actions, .dashboard-folder-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 button.secondary-button { width: auto; margin-top: 0; font-size: 13px; padding: 10px 14px; background: var(--paper); color: var(--ink); justify-content: center; }
 .selected-series { display: flex; gap: 20px; align-items: center; padding: 14px; margin-top: 12px; background: #eef4ff; border: 2px solid var(--ink); }
