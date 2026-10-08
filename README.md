@@ -94,6 +94,57 @@ Après redémarrage du serveur, les traitements interrompus reprennent ; les aud
 qui attendent une validation restent en brouillon et ne déclenchent aucun appel IA.
 Les projets existants conservent leur fonctionnement et leur piste actuelle.
 
+## Dossiers de séries et introduction
+
+Le dashboard regroupe les épisodes dans des dossiers de séries. À la création
+d’une vidéo, on peut choisir **Sans dossier**, un dossier existant ou créer un
+nouveau dossier. Un dossier exige un nom et une image PNG, JPEG ou WebP
+(20 Mo maximum). L’image est sauvegardée dans `data/series/<id>/`, puis copiée
+dans chaque épisode pour préserver les montages et leurs exports.
+
+Toutes les illustrations sont générées, y compris celles du début. L’introduction
+occupe une piste supérieure, de 0 seconde jusqu’à sa fin, pendant que l’audio et
+les illustrations continuent dessous avec leurs timings habituels. Sa fin révèle
+la scène correspondant au moment atteint ; elle ne décale aucune scène.
+Les vidéos sans dossier ne reçoivent pas cette introduction.
+
+Dans **Introduction de série**, clique et glisse sur l’image pour choisir la zone
+de l’épisode. Le cadre peut être redimensionné, ou son zoom ajusté avec le curseur
+(de ×1 à ×8). Le cadrage est propre à chaque vidéo et doit être choisi avant
+l’export. Le lecteur et l’export utilisent le même mouvement de caméra progressif.
+
+Les trois phases sont **Image entière**, **Mouvement de zoom**, **Image zoomée**.
+Leurs durées se règlent dans les champs (point ou virgule), ou en déplaçant les
+poignées bleues sur la piste d’introduction. Les deux poignées internes déplacent
+les séparations sans changer la durée totale ; la poignée finale ajuste la fin.
+Les poignées rouges des illustrations conservent leur fonctionnement.
+
+Les valeurs communes à tous les dossiers sont dans `video-defaults.js`, à la racine :
+1 seconde avant le zoom, 0,8 seconde de mouvement, 0,7 seconde après le zoom.
+Elles sont copiées dans chaque nouvelle vidéo ; les modifications ultérieures
+sont individuelles. **Durées par défaut** permet de réappliquer les valeurs communes.
+Une introduction dépassant la durée de l’audio est coupée à la fin de la vidéo.
+
+## Montage vertical 9:16
+
+Les nouveaux projets verticaux génèrent toujours des illustrations en
+`1024x1280` (4:5), mais le lecteur et le MP4 utilisent un cadre `1080x1920` (9:16).
+Dans **Mise en page verticale**, on peut ajouter le titre de l’épisode, le déplacer
+directement dans le cadre et choisir sa taille et sa couleur. Les illustrations
+se déplacent ensemble verticalement et peuvent être redimensionnées ensemble,
+en conservant leur ratio 4:5. La couleur de fond du projet remplit les espaces libres.
+La zone des sous-titres est un guide dans l’éditeur ; aucun sous-titre n’est généré.
+
+L’introduction utilise tout le cadre et recouvre le titre de l’épisode. Son
+cadrage ne dépend pas de la position des illustrations. Les images de série d’un
+autre ratio restent entièrement visibles au début, avec des bandes de fond.
+Le titre est rendu en PNG pour conserver le même rendu dans le lecteur et l’export.
+Les réglages et le titre sont inclus dans l’instantané de chaque export.
+
+Les anciens projets verticaux conservent leur cadre 4:5 ; le bouton **Adapter le
+montage au 9:16** active la nouvelle mise en page. Les projets horizontaux
+conservent leur format 16:9.
+
 ## Plusieurs projets et travaux en arrière-plan
 
 Les nouvelles générations sont traitées **une par une, dans l’ordre de validation**.
@@ -205,11 +256,11 @@ Pour ne voir que les erreurs du dernier projet sous PowerShell :
 Get-Content data/projects/<id>/generation.log | Select-String '"level":"error"'
 ```
 
-Le format choisi est également sauvegardé dans le projet. Il pilote les prompts,
-les générations initiales, les régénérations et les dimensions du lecteur :
+Le format des illustrations est également sauvegardé dans le projet. Il pilote
+les prompts, les générations initiales et les régénérations :
 
 - horizontal : `1536x864` en 16:9 ;
-- vertical : `1024x1280` en 4:5.
+- vertical : `1024x1280` en 4:5, montées en `1080x1920` (9:16) pour les nouveaux projets.
 
 La couleur d’arrière-plan est sauvegardée dans `backgroundColor` avec son nom
 et son code `#RRGGBB`. Les anciens projets utilisent automatiquement le blanc

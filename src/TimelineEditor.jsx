@@ -6,6 +6,7 @@ import React, {
   useState,
   useSyncExternalStore,
 } from "react";
+import { clamp, introDuration } from "../lib/video-layout.js";
 
 const getStart = (image) => image.timelineStart ?? image.start;
 
@@ -33,10 +34,13 @@ export const TimelineEditor = ({
   playerRef,
   fps,
   onTimingChange,
+  onCompositionChange,
 }) => {
   const [peaks, setPeaks] = useState([]);
   const [pixelsPerSecond, setPixelsPerSecond] = useState(100);
   const [drag, setDrag] = useState(null);
+  const [introDrag, setIntroDrag] = useState(null);
+  const latestIntro = useRef(null);
   const [scrubbing, setScrubbing] = useState(null);
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 20 });
   const [snapLabel, setSnapLabel] = useState("");
@@ -52,6 +56,7 @@ export const TimelineEditor = ({
   const audioDuration =
     project.audioDuration || words.at(-1)?.end || project.segments.at(-1)?.end || 1;
   const timelineWidth = Math.max(900, Math.ceil(audioDuration * pixelsPerSecond));
+  const intro = introDrag?.value || project.intro;
   const orderedImages = useMemo(
     () => project.images.map((image) => image.index === drag?.imageIndex
       ? { ...image, timelineStart: drag.start ?? drag.originStart } : image).sort((a, b) => a.index - b.index),
@@ -154,7 +159,7 @@ export const TimelineEditor = ({
   );
 
   const beginScrub = (event) => {
-    if (event.button !== 0 || event.target.closest(".clip-handle")) return;
+    if (event.button !== 0 || event.target.closest(".clip-handle, .intro-handle")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     setScrubbing(event.pointerId);
     seekToClientX(event.clientX);
@@ -250,6 +255,43 @@ export const TimelineEditor = ({
     scrollFrame.current = requestAnimationFrame(updateVisibleRange);
   };
 
+  const beginIntroDrag = (event, boundary) => {
+    if (event.button !== 0) return;
+    event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
+    latestIntro.current = { ...project.intro };
+    setIntroDrag({ boundary, pointerId: event.pointerId, originX: event.clientX, original: { ...project.intro }, value: { ...project.intro } });
+    setError("");
+  };
+  const moveIntroDrag = (event) => {
+    if (!introDrag || event.pointerId !== introDrag.pointerId) return;
+    const original = introDrag.original;
+    const delta = (event.clientX - introDrag.originX) / pixelsPerSecond;
+    const fullEnd = original.fullDuration;
+    const zoomEnd = fullEnd + original.zoomDuration;
+    const total = introDuration(original);
+    let value = { ...original }, time;
+    if (introDrag.boundary === "full") {
+      time = clamp(fullEnd + delta, 0, zoomEnd - 1 / fps);
+      value.fullDuration = time; value.zoomDuration = zoomEnd - time;
+    } else if (introDrag.boundary === "zoom") {
+      time = clamp(zoomEnd + delta, fullEnd + 1 / fps, total);
+      value.zoomDuration = time - fullEnd; value.holdDuration = total - time;
+    } else {
+      time = clamp(total + delta, zoomEnd, Math.max(zoomEnd, audioDuration));
+      value.holdDuration = time - zoomEnd;
+    }
+    value = { ...value, fullDuration: Math.round(value.fullDuration * 1000) / 1000, zoomDuration: Math.round(value.zoomDuration * 1000) / 1000, holdDuration: Math.round(value.holdDuration * 1000) / 1000 };
+    latestIntro.current = value; setIntroDrag((current) => ({ ...current, value }));
+    playerRef.current?.seekTo(Math.min(Math.ceil(audioDuration * fps) - 1, Math.round(time * fps)));
+  };
+  const finishIntroDrag = async (event) => {
+    if (!introDrag || event.pointerId !== introDrag.pointerId) return;
+    const value = latestIntro.current; setIntroDrag(null); setSaving((count) => count + 1);
+    try { await onCompositionChange({ intro: { fullDuration: value.fullDuration, zoomDuration: value.zoomDuration, holdDuration: value.holdDuration } }); }
+    catch (caught) { setError(caught.message); }
+    finally { setSaving((count) => count - 1); }
+  };
+
   const visibleWords = words.filter(
     (word) => word.end >= visibleRange.start && word.start <= visibleRange.end,
   );
@@ -268,6 +310,7 @@ export const TimelineEditor = ({
           <p className="timeline-help">
             Clique ou glisse sur la timeline pour naviguer. Déplace une poignée
             rouge pour recaler une image sur un mot.
+            {project.intro ? " Les poignées bleues règlent les phases de l’introduction sur la piste du dessus." : ""}
           </p>
         </div>
         <label className="timeline-zoom">
@@ -301,7 +344,7 @@ export const TimelineEditor = ({
       >
         <div
           className="timeline-inner"
-          style={{ width: timelineWidth }}
+          style={{ width: timelineWidth, ...(intro ? { height: 370 } : {}) }}
           onPointerDown={beginScrub}
           onPointerMove={moveScrub}
           onPointerUp={endScrub}
@@ -355,7 +398,19 @@ export const TimelineEditor = ({
             </div>
           </div>
 
+          {intro ? <div className="intro-track">
+            <span className="track-label">Introduction · au-dessus des illustrations</span>
+            <div className="timeline-intro-clip" style={{ width: Math.min(audioDuration, introDuration(intro)) * pixelsPerSecond }}>
+              <img src={project.intro.src} alt="" draggable="false" />
+              <div className="intro-phase intro-phase-full" style={{ left: 0, width: intro.fullDuration * pixelsPerSecond }} title={`Image entière · ${intro.fullDuration.toFixed(2)} s`}>Image entière</div>
+              <div className="intro-phase intro-phase-zoom" style={{ left: intro.fullDuration * pixelsPerSecond, width: intro.zoomDuration * pixelsPerSecond }} title={`Zoom · ${intro.zoomDuration.toFixed(2)} s`}>Zoom</div>
+              <div className="intro-phase intro-phase-hold" style={{ left: (intro.fullDuration + intro.zoomDuration) * pixelsPerSecond, width: intro.holdDuration * pixelsPerSecond }} title={`Image zoomée · ${intro.holdDuration.toFixed(2)} s`}>Image zoomée</div>
+            </div>
+            {[{ id: "full", label: "Déplacer le début du zoom", time: intro.fullDuration }, { id: "zoom", label: "Déplacer la fin du zoom", time: intro.fullDuration + intro.zoomDuration }, { id: "end", label: "Ajuster la fin de l’introduction", time: Math.min(audioDuration, introDuration(intro)) }].map((boundary) => <button key={boundary.id} type="button" className="intro-handle" style={{ left: Math.min(audioDuration, boundary.time) * pixelsPerSecond }} aria-label={boundary.label} title={boundary.label} onPointerDown={(event) => beginIntroDrag(event, boundary.id)} onPointerMove={moveIntroDrag} onPointerUp={finishIntroDrag} onPointerCancel={finishIntroDrag} />)}
+          </div> : null}
+
           <div className="image-track">
+            {intro ? <span className="track-label">Illustrations générées · piste du dessous</span> : null}
             {orderedImages.map((image, position) => {
               const start = getStart(image);
               const next = orderedImages[position + 1];

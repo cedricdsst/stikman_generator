@@ -11,6 +11,7 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.10",
     "@remotion/media": "^4.0.332",
     "@remotion/player": "^4.0.332",
     "cross-env": "^10.0.0",

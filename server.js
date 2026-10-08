@@ -14,6 +14,10 @@ import { createPipeline } from "./lib/pipeline.js";
 import { createExportWork } from "./lib/export-work.js";
 import { rateState } from "./lib/rate-state.js";
 import { createAudioWork, newAudioPreparation, publicAudioPreparation } from "./lib/audio-work.js";
+import { createSeriesStore } from "./lib/series-store.js";
+import { normalizeIntro, normalizeLayout, outputFormat, verticalLayout } from "./lib/video-layout.js";
+import { VERTICAL_DEFAULTS } from "./video-defaults.js";
+import { renderTitle } from "./lib/title-image.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -21,6 +25,7 @@ const port = Number(process.env.PORT || 3000);
 const jobs = new Map();
 const projectsRoot = path.resolve(process.env.PROJECTS_ROOT || path.join(__dirname, "data", "projects"));
 const uploadsRoot = path.resolve(process.env.UPLOADS_ROOT || path.join(__dirname, "uploads"));
+const seriesStore = createSeriesStore(path.resolve(process.env.SERIES_ROOT || path.join(path.dirname(projectsRoot), "series")));
 const projectQueue = new TaskQueue();
 const exportQueue = new TaskQueue();
 const audioQueue = new TaskQueue();
@@ -117,6 +122,23 @@ const upload = multer({
 
 app.use(express.json({ limit: "32kb" }));
 
+const seriesUpload = multer({ dest: uploadsRoot, limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => callback(null, ["image/png", "image/jpeg", "image/webp"].includes(file.mimetype)) });
+app.get("/api/series", (_req, res) => res.json(seriesStore.list().map((series) => ({ ...series,
+  projectCount: [...jobs.values()].filter((job) => job.seriesId === series.id).length }))));
+app.post("/api/series", (req, res, next) => seriesUpload.single("image")(req, res, (error) => {
+  if (error) return res.status(400).json({ error: error.code === "LIMIT_FILE_SIZE" ? "L’image ne doit pas dépasser 20 Mo." : "Impossible d’importer cette image." });
+  next();
+}), async (req, res) => {
+  try { res.status(201).json(await seriesStore.create(req.body?.name, req.file)); }
+  catch (error) { res.status(error.status || 500).json({ error: formatError(error) }); }
+  finally { if (req.file) await fs.promises.rm(req.file.path, { force: true }).catch(() => {}); }
+});
+app.get("/api/series/:id/image", (req, res) => {
+  if (!seriesStore.get(req.params.id)) return res.status(404).send("Dossier introuvable.");
+  res.sendFile(seriesStore.imagePath(req.params.id));
+});
+
 app.post("/api/jobs", upload.single("audio"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "Ajoute un fichier audio ou vidéo." });
@@ -143,11 +165,17 @@ app.post("/api/jobs", upload.single("audio"), async (req, res) => {
   }
 
   const id = crypto.randomUUID();
+  const seriesId = req.body?.seriesId || null;
+  if (seriesId && !seriesStore.get(seriesId)) {
+    await fs.promises.rm(req.file.path, { force: true });
+    return res.status(400).json({ error: "Ce dossier de série n’existe pas." });
+  }
   const visualFormat = getVisualFormat(req.body?.format);
   const projectDir = path.join(projectsRoot, id);
   await fs.promises.mkdir(path.join(projectDir, "images"), { recursive: true });
   const sourceFilename = `source${path.extname(req.file.originalname).replace(/[^.a-zA-Z0-9]/g, "") || ".bin"}`;
   await fs.promises.rename(req.file.path, path.join(projectDir, sourceFilename));
+  if (seriesId) await fs.promises.copyFile(seriesStore.imagePath(seriesId), path.join(projectDir, "images", "series-intro.png"));
   const job = {
     id,
     title: path.parse(req.file.originalname).name,
@@ -173,6 +201,9 @@ app.post("/api/jobs", upload.single("audio"), async (req, res) => {
     pipeline: {},
     timelineHistory: [],
     visualFormat,
+    seriesId,
+    intro: seriesId ? normalizeIntro({ filename: "series-intro.png" }) : null,
+    videoLayout: visualFormat.id === "vertical" ? structuredClone(VERTICAL_DEFAULTS) : null,
     backgroundColor,
     error: null,
     createdAt: new Date().toISOString(),
@@ -258,6 +289,8 @@ app.get("/api/projects", (_req, res) => {
       thumbnail: job.images.find((image) => image.src)?.src || null,
       source: job.source,
       visualFormat: job.visualFormat,
+      seriesId: job.seriesId || null,
+      outputFormat: outputFormat(job),
       error: job.error,
     }));
   res.json(projects);
@@ -267,6 +300,42 @@ app.get("/api/projects/:id", (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Projet introuvable." });
   res.json(toPublicProject(job));
+});
+
+app.post("/api/projects/:id/composition", async (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Projet introuvable." });
+  const input = req.body || {};
+  const isObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+  if (("intro" in input && !isObject(input.intro)) || ("videoLayout" in input && !isObject(input.videoLayout)) ||
+      (input.videoLayout && "title" in input.videoLayout && !isObject(input.videoLayout.title))) {
+    return res.status(400).json({ error: "Réglages de montage invalides." });
+  }
+  if (input.intro !== undefined && !job.intro) return res.status(400).json({ error: "Cette vidéo n’a pas d’introduction de série." });
+  if (input.videoLayout !== undefined && job.visualFormat.id !== "vertical") return res.status(400).json({ error: "La mise en page 9:16 concerne les projets verticaux." });
+  const introKeys = ["fullDuration", "zoomDuration", "holdDuration", "zoom", "targetX", "targetY"];
+  const layoutKeys = ["imageScale", "imagePosition"];
+  if ((input.intro && introKeys.some((key) => key in input.intro && !Number.isFinite(input.intro[key]))) ||
+      (input.videoLayout && layoutKeys.some((key) => key in input.videoLayout && !Number.isFinite(input.videoLayout[key]))) ||
+      (input.videoLayout?.title && ["x", "y", "fontSize"].some((key) => key in input.videoLayout.title && !Number.isFinite(input.videoLayout.title[key])))) {
+    return res.status(400).json({ error: "Les réglages doivent être des nombres valides." });
+  }
+  if (input.intro) {
+    const changes = Object.fromEntries([...introKeys, "targetConfigured"].filter((key) => key in input.intro).map((key) => [key, input.intro[key]]));
+    job.intro = normalizeIntro({ ...job.intro, ...changes });
+  }
+  if (input.videoLayout) {
+    const current = job.videoLayout || VERTICAL_DEFAULTS;
+    job.videoLayout = normalizeLayout({ ...current, ...input.videoLayout, title: { ...current.title, ...input.videoLayout.title } });
+  }
+  await queueSave(job);
+  res.json(toPublicProject(job));
+});
+
+app.get("/api/projects/:id/title.png", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).send("Projet introuvable.");
+  res.type("png").set("Cache-Control", "no-cache").send(renderTitle(job));
 });
 
 app.get("/api/queue", (_req, res) => {
@@ -449,7 +518,8 @@ app.post("/api/projects/:id/scenes/:index/timing", async (req, res) => {
 app.post("/api/projects/:id/export", async (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) return res.status(404).json({ error: "Projet introuvable." });
-  if (!toPublicExport(job).canExport) return res.status(409).json({ error: "Toutes les scènes doivent avoir une image avant l’export." });
+  if (!toPublicExport(job).canExport) return res.status(409).json({ error: job.intro && !job.intro.targetConfigured
+    ? "Choisis le cadrage du zoom pour cet épisode avant l’export." : "Toutes les scènes doivent avoir une image avant l’export." });
   await exportWork.request(job);
   res.status(activeTask(job.export) ? 202 : 200).json(toPublicProject(job));
 });
@@ -1036,7 +1106,7 @@ function toPublicExport(job) {
   return {
     status: exportState.status,
     isCurrent,
-    canExport: Boolean(job.audioFilename && job.images.length && job.images.every((image) => image.src && !image.error)),
+    canExport: Boolean(job.audioFilename && job.images.length && job.images.every((image) => image.src && !image.error) && (!job.intro || job.intro.targetConfigured)),
     error: exportState.error || null,
     requestedAt: exportState.requestedAt || null,
     completedAt: exportState.completedAt || null,
@@ -1071,6 +1141,9 @@ function projectSnapshot(job) {
     timelineHistory: job.timelineHistory || [],
     export: job.export || null,
     visualFormat: job.visualFormat,
+    seriesId: job.seriesId || null,
+    intro: job.intro || null,
+    videoLayout: job.videoLayout || null,
     backgroundColor: job.backgroundColor || {
       name: "blanc",
       hex: "#FFFFFF",
@@ -1127,6 +1200,11 @@ function toPublicProject(job) {
     ...snapshot,
     export: toPublicExport(job),
     audioPreparation: publicAudioPreparation(job),
+    series: job.seriesId && seriesStore.get(job.seriesId) ? seriesStore.publicSeries(seriesStore.get(job.seriesId)) : null,
+    intro: job.intro ? { ...job.intro, src: `/api/projects/${job.id}/images/${job.intro.filename}` } : null,
+    outputFormat: outputFormat(job),
+    titleUrl: verticalLayout(job) && job.videoLayout.title.text.trim()
+      ? `/api/projects/${job.id}/title.png?revision=${job.revision}` : null,
     audioUrl: snapshot.audioFilename
       ? `/api/projects/${job.id}/audio`
       : null,
@@ -1214,6 +1292,7 @@ async function loadProjects() {
 
 async function startServer() {
   await imageRateState.load();
+  await seriesStore.load();
   await loadProjects();
 
   if (process.env.NODE_ENV === "development") {

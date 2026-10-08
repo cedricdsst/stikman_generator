@@ -8,10 +8,24 @@ export function useProject(id) {
   const pending = useRef(new Map());
   const sequence = useRef(0);
   const timingChain = useRef(Promise.resolve());
+  const pendingComposition = useRef(new Map());
+
+  const withEdits = (data) => {
+    const next = withTimings(data, pending.current);
+    if (!next || !pendingComposition.current.size) return next;
+    const result = { ...next };
+    for (const { patch } of pendingComposition.current.values()) {
+      if (patch.intro) result.intro = { ...result.intro, ...patch.intro };
+      if (patch.videoLayout) result.videoLayout = { ...result.videoLayout, ...patch.videoLayout, title: { ...result.videoLayout?.title, ...patch.videoLayout.title } };
+    }
+    // The local title is drawn with the same canvas routine as the exported PNG.
+    result.titleUrl = null;
+    return result;
+  };
 
   const accept = useCallback((data) => {
     serverProject.current = latestProject(serverProject.current, data);
-    setProject(withTimings(serverProject.current, pending.current));
+    setProject(withEdits(serverProject.current));
   }, []);
 
   useEffect(() => {
@@ -34,7 +48,7 @@ export function useProject(id) {
   const saveTiming = (imageIndex, start) => {
     const token = ++sequence.current;
     pending.current.set(imageIndex, { start, token });
-    setProject(withTimings(serverProject.current, pending.current));
+    setProject(withEdits(serverProject.current));
     const work = timingChain.current.catch(() => {}).then(async () => {
       try {
         const data = await writeJson(`/api/projects/${id}/scenes/${imageIndex}/timing`, { start });
@@ -42,7 +56,7 @@ export function useProject(id) {
         accept(data);
       } catch (caught) {
         if (pending.current.get(imageIndex)?.token === token) pending.current.delete(imageIndex);
-        setProject(withTimings(serverProject.current, pending.current));
+        setProject(withEdits(serverProject.current));
         throw caught;
       }
     });
@@ -50,5 +64,23 @@ export function useProject(id) {
     return trackWrite(work);
   };
 
-  return { project, error, accept, saveTiming };
+  const saveComposition = (patch) => {
+    const token = ++sequence.current;
+    pendingComposition.current.set(token, { patch });
+    setProject(withEdits(serverProject.current));
+    const work = timingChain.current.catch(() => {}).then(async () => {
+      try {
+        const data = await writeJson(`/api/projects/${id}/composition`, patch);
+        pendingComposition.current.delete(token);
+        accept(data);
+      } catch (caught) {
+        pendingComposition.current.delete(token);
+        setProject(withEdits(serverProject.current));
+        throw caught;
+      }
+    });
+    timingChain.current = work;
+    return trackWrite(work);
+  };
+  return { project, error, accept, saveTiming, saveComposition };
 }

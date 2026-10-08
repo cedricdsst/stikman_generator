@@ -6,6 +6,9 @@ import { QueueStatus } from "./QueueStatus";
 import { AudioPreparation, ApprovedAudio } from "./AudioPreparation";
 import { useProject } from "./useProject";
 import { pendingWrites, trackWrite, writeJson } from "./project-sync.js";
+import { SeriesPicker, SeriesCreator } from "./SeriesPicker";
+import { CompositionEditor } from "./CompositionEditor";
+import { outputFormat } from "../lib/video-layout.js";
 
 const FPS = 30;
 
@@ -72,6 +75,7 @@ const Header = () => (
 const Generator = () => {
   const [file, setFile] = useState(null);
   const [format, setFormat] = useState("horizontal");
+  const [seriesId, setSeriesId] = useState(new URLSearchParams(window.location.search).get("series") || "");
   const [backgroundName, setBackgroundName] = useState("blanc");
   const [backgroundHex, setBackgroundHex] = useState("#FFFFFF");
   const [error, setError] = useState("");
@@ -84,7 +88,7 @@ const Generator = () => {
 
   const submit = async (event) => {
     event.preventDefault();
-    if (!file) return;
+    if (!file || seriesId === "__new__") return;
 
     setError("");
     setBusy(true);
@@ -93,6 +97,7 @@ const Generator = () => {
       const body = new FormData();
       body.append("audio", file);
       body.append("format", format);
+      if (seriesId) body.append("seriesId", seriesId);
       body.append("backgroundName", backgroundName);
       body.append("backgroundHex", backgroundHex);
       body.append("prepareAudio", "true");
@@ -142,9 +147,10 @@ const Generator = () => {
               onChange={() => setFormat("vertical")}
             />
             <span className="format-icon format-icon-vertical" />
-            <span><strong>Vertical</strong><small>4:5 · Mobile</small></span>
+            <span><strong>Vertical</strong><small>Vidéo 9:16 · Images 4:5</small></span>
           </label>
         </fieldset>
+        <SeriesPicker value={seriesId} onChange={setSeriesId} disabled={busy} />
         <fieldset className="background-picker">
           <legend>Couleur de l’arrière-plan</legend>
           <div
@@ -204,7 +210,7 @@ const Generator = () => {
             onChange={(event) => selectFiles(event.target.files)}
           />
         </label>
-        <button type="submit" disabled={busy || !file}>
+        <button type="submit" disabled={busy || !file || seriesId === "__new__"}>
           <span>{busy ? "Import en cours…" : "Préparer mon audio"}</span>
           <span aria-hidden="true">→</span>
         </button>
@@ -217,11 +223,23 @@ const Generator = () => {
 
 const Dashboard = () => {
   const [projects, setProjects] = useState([]);
+  const [series, setSeries] = useState([]);
+  const [activeSeries, setActiveSeries] = useState(new URLSearchParams(window.location.search).get("series") || "");
+  const [creatingSeries, setCreatingSeries] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [projectToDelete, setProjectToDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
+  const openSeries = (id) => {
+    setActiveSeries(id);
+    window.history.pushState({}, "", id ? `/dashboard?series=${encodeURIComponent(id)}` : "/dashboard");
+  };
+  useEffect(() => {
+    const handleBack = () => setActiveSeries(new URLSearchParams(window.location.search).get("series") || "");
+    window.addEventListener("popstate", handleBack);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,7 +250,11 @@ const Dashboard = () => {
         const response = await fetch("/api/projects");
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Impossible de charger les projets.");
+        const foldersResponse = await fetch("/api/series");
+        const folders = await foldersResponse.json();
+        if (!foldersResponse.ok) throw new Error(folders.error || "Impossible de charger les dossiers.");
         if (cancelled) return;
+        setSeries(folders);
         setProjects(data);
         setError("");
         setLoading(false);
@@ -278,28 +300,41 @@ const Dashboard = () => {
     }
   };
 
+  const selectedSeries = series.find((entry) => entry.id === activeSeries);
+  const visibleProjects = projects.filter((project) => (project.seriesId || "") === activeSeries);
+
   return (
     <section className="dashboard">
       <div className="section-title">
         <div>
           <p className="eyebrow">BIBLIOTHÈQUE</p>
-          <h1 className="dashboard-title">Tes projets sauvegardés</h1>
+          <h1 className="dashboard-title">{selectedSeries?.name || "Tes projets sauvegardés"}</h1>
         </div>
-        <span className="count">{projects.length} projet{projects.length > 1 ? "s" : ""}</span>
+        <span className="count">{activeSeries ? visibleProjects.length : projects.length} vidéo{(activeSeries ? visibleProjects.length : projects.length) > 1 ? "s" : ""}</span>
       </div>
+      <div className="dashboard-folder-actions">
+        {activeSeries ? <button type="button" className="secondary-button" onClick={() => openSeries("")}>← Tous les dossiers</button> : <button type="button" className="secondary-button" onClick={() => setCreatingSeries((current) => !current)}>+ Nouveau dossier</button>}
+        {activeSeries ? <a className="nav-button nav-button-primary" href={`/?series=${encodeURIComponent(activeSeries)}`}>+ Vidéo dans cette série</a> : null}
+      </div>
+      {creatingSeries && !activeSeries ? <section className="folder-create-card"><SeriesCreator onCreated={(entry) => { setSeries((current) => [...current, { ...entry, projectCount: 0 }]); setCreatingSeries(false); }} onCancel={() => setCreatingSeries(false)} /></section> : null}
+      {!activeSeries ? <div className="series-grid">{series.map((entry) => <button type="button" className="series-card" key={entry.id} onClick={() => openSeries(entry.id)}>
+        <img src={entry.imageUrl} alt="" /><span><strong>▣ {entry.name}</strong><small>{entry.projectCount} vidéo(s)</small></span>
+      </button>)}</div> : null}
+      {selectedSeries ? <div className="selected-series dashboard-series"><img src={selectedSeries.imageUrl} alt="Image d’introduction de la série" /><p>Chaque épisode utilise cette image d’introduction avec son propre cadrage du zoom.</p></div> : null}
+      {!activeSeries && projects.length ? <h2 className="outside-folder-title">Vidéos sans dossier</h2> : null}
 
       {loading ? <p className="empty-state">Chargement des projets…</p> : null}
       {error ? <section className="error-box" role="alert">{error}</section> : null}
-      {!loading && !error && !projects.length ? (
+      {!loading && !error && !visibleProjects.length ? (
         <div className="empty-state">
-          <strong>Aucun projet pour l’instant.</strong>
-          <p>Ta première génération apparaîtra automatiquement ici.</p>
-          <a className="inline-link" href="/">Créer une vidéo →</a>
+          <strong>{activeSeries ? "Aucune vidéo dans ce dossier." : "Aucune vidéo sans dossier."}</strong>
+          <p>{activeSeries ? "Ajoute le premier épisode de cette série." : "Les vidéos créées sans dossier apparaîtront ici."}</p>
+          <a className="inline-link" href={activeSeries ? `/?series=${encodeURIComponent(activeSeries)}` : "/"}>Créer une vidéo →</a>
         </div>
       ) : null}
 
       <div className="projects-grid">
-        {projects.map((project) => (
+        {visibleProjects.map((project) => (
           <article className="project-card" key={project.id}>
             <button
               className="project-delete-button"
@@ -328,7 +363,7 @@ const Dashboard = () => {
                 <span className={`status-pill status-${project.status}`}>
                   {statusLabel(project.status)}
                 </span>
-                <span className="format-pill">{project.visualFormat?.label || "Horizontal 16:9"}</span>
+                <span className="format-pill">{project.outputFormat?.height === 1920 ? "Vertical 9:16" : project.visualFormat?.label || "Horizontal 16:9"}</span>
               </div>
               <div className="project-card-copy">
                 <strong>{project.title}</strong>
@@ -401,13 +436,13 @@ const Dashboard = () => {
 };
 
 const ProjectPage = ({ id }) => {
-  const { project, error, accept, saveTiming } = useProject(id);
+  const { project, error, accept, saveTiming, saveComposition } = useProject(id);
   if (!project) return <p className="empty-state">{error || "Chargement du projet…"}</p>;
 
   if (project.status === "draft" && project.audioPreparation) return <>
     <section className="project-heading"><a className="back-link" href="/dashboard">← Retour au dashboard</a>
       <h1 className="project-title">{project.title}</h1>
-      <p className="project-date">{project.visualFormat?.label} · Audio à préparer</p>
+      <p className="project-date">{project.videoLayout?.enabled ? "Vidéo verticale 9:16 · Illustrations 4:5" : project.visualFormat?.label} · Audio à préparer</p>
     </section>
     {error ? <p className="scene-action-error" role="status">{error}</p> : null}
     <AudioPreparation project={project} onProjectChange={accept} />
@@ -421,7 +456,7 @@ const ProjectPage = ({ id }) => {
         <p className="project-date">
           Créé le {formatDate(project.createdAt)} · {project.images.length} scène(s) ·{" "}
           {formatDuration(project.audioDuration || project.segments.at(-1)?.end || 0)} ·{" "}
-          {project.visualFormat?.label || "Horizontal 16:9"}
+          {project.videoLayout?.enabled ? "Vidéo verticale 9:16 · Illustrations 4:5" : project.visualFormat?.label || "Horizontal 16:9"}
         </p>
       </section>
       {error ? <p className="scene-action-error" role="status">{error}</p> : null}
@@ -441,6 +476,7 @@ const ProjectPage = ({ id }) => {
         editable
         onProjectChange={accept}
         onTimingChange={saveTiming}
+        onCompositionChange={saveComposition}
       />
       <details className="technical-data">
         <summary>Données techniques et réponses IA</summary>
@@ -486,6 +522,7 @@ const ProjectContent = ({
   editable = false,
   onProjectChange,
   onTimingChange,
+  onCompositionChange,
 }) => {
   const images = [...project.images].sort((a, b) => a.index - b.index);
   const duration = project.audioDuration || project.segments.at(-1)?.end || images.at(-1)?.end || 1;
@@ -506,6 +543,7 @@ const ProjectContent = ({
           visualFormat={visualFormat}
           onProjectChange={onProjectChange}
           onTimingChange={onTimingChange}
+          onCompositionChange={onCompositionChange}
         />
       ) : null}
 
@@ -534,13 +572,14 @@ const ProjectContent = ({
   );
 };
 
-const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectChange, onTimingChange }) => {
+const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectChange, onTimingChange, onCompositionChange }) => {
   const playerRef = useRef(null);
   const [exportError, setExportError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const exportState = project.export || { status: "idle" };
   const exporting = submitting || ["queued", "running"].includes(exportState.status);
   const durationInFrames = Math.max(1, Math.ceil(duration * FPS));
+  const output = outputFormat(project);
 
   useEffect(() => {
     const togglePlayback = (event) => {
@@ -583,7 +622,8 @@ const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectCha
   };
 
   return (
-    <section className="video-section editor-workspace">
+    <>
+    <section className={`video-section editor-workspace ${project.intro ? "editor-with-intro" : ""}`}>
       <div className="editor-toolbar">
         <div>
           <strong>Montage final</strong>
@@ -592,7 +632,8 @@ const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectCha
               ? exportState.status === "queued" ? "Export en attente…" : "Création du MP4. Tu peux continuer le montage."
               : exportState.status === "ready"
                 ? exportState.isCurrent ? "La vidéo est prête." : "Le montage a changé. L’export disponible correspond à la version précédente."
-                : exportState.canExport ? "Tes images, tes versions et tes timings actuels." : "Monte déjà la vidéo : les images remplaceront les scènes provisoires."}
+                : project.intro && !project.intro.targetConfigured ? "Choisis le cadrage du zoom de l’introduction avant d’exporter."
+                  : exportState.canExport ? "Tes images, tes versions et tes timings actuels." : "Monte déjà la vidéo : les images remplaceront les scènes provisoires."}
           </span>
         </div>
         {exportState.status === "ready" && exportState.downloadUrl ? (
@@ -626,10 +667,11 @@ const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectCha
             audioUrl: project.audioUrl,
             scenes: images,
             audioDuration: duration,
+            project,
           }}
           durationInFrames={durationInFrames}
-          compositionWidth={visualFormat.width}
-          compositionHeight={visualFormat.height}
+          compositionWidth={output.width}
+          compositionHeight={output.height}
           fps={FPS}
           controls
           style={{
@@ -637,7 +679,7 @@ const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectCha
             width: "auto",
             maxWidth: "100%",
             maxHeight: "100%",
-            aspectRatio: `${visualFormat.width} / ${visualFormat.height}`,
+            aspectRatio: `${output.width} / ${output.height}`,
             margin: "0 auto",
             flex: "0 1 auto",
           }}
@@ -649,8 +691,11 @@ const EditorWorkspace = ({ project, images, duration, visualFormat, onProjectCha
         playerRef={playerRef}
         fps={FPS}
         onTimingChange={onTimingChange}
+        onCompositionChange={onCompositionChange}
       />
     </section>
+    <CompositionEditor project={project} onChange={onCompositionChange} playerRef={playerRef} />
+    </>
   );
 };
 
